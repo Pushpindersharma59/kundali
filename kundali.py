@@ -1860,6 +1860,87 @@ BCP_GOOD_STYLE = ("#1e7b3f", "#1e7b3f", "3")
 BCP_CAUTION_STYLE = ("#a83232", "#a83232", "3")
 
 
+DAY_LORD_BY_WEEKDAY = ["Mo", "Ma", "Me", "Jp", "Ve", "Sa", "Su"]  # Python weekday(): Mon=0...Sun=6
+
+
+def find_solar_return_jd(natal_sun_sid: float, year: int, lat: float, lon: float, tz: float) -> float:
+    """Bisection search for the exact moment the Sun's sidereal longitude
+    returns to its natal value in the given year (the Varṣa Praveśa
+    instant). Searches a window around the same month/day as a typical
+    solar return, refining to sub-second precision."""
+    approx_jd = julian_day(year, 6, 15, 12.0 - tz)
+    for _ in range(3):
+        cur = sun_longitude(approx_jd) - ayanamsa(approx_jd)
+        diff = ((natal_sun_sid - norm360(cur) + 180) % 360) - 180
+        approx_jd += diff * (365.2422 / 360.0)
+    lo, hi = approx_jd - 2, approx_jd + 2
+
+    def f(jd):
+        sid = norm360(sun_longitude(jd) - ayanamsa(jd))
+        return ((sid - natal_sun_sid + 180) % 360) - 180
+
+    flo, fhi = f(lo), f(hi)
+    if flo * fhi > 0:
+        hi = approx_jd + 366
+        fhi = f(hi)
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        fm = f(mid)
+        if flo * fm <= 0:
+            hi, fhi = mid, fm
+        else:
+            lo, flo = mid, fm
+    return (lo + hi) / 2
+
+
+def compute_varsha_pravesha(birth_chart: dict, birth_dt: datetime, year: int, lat: float, lon: float, tz: float) -> dict:
+    """Full Varṣa Praveśa (Tājika solar-return) computation: the exact
+    return instant, the annual (Varṣa) chart cast for that moment and
+    location, Munthā (progressed Lagna), and 4 of the 5 classical
+    Pañcādhikārī office-bearers. The Tri-Rāśi (triplicity) office is
+    deliberately omitted — its classical table has documented scholarly
+    disagreement (Gansten 2018 flags a transmission error in at least one
+    major source), and actually crowning a Varṣeśvara needs a Pañcavargīya
+    Bala strength score this app doesn't compute — so the four office
+    candidates are shown without picking a winner among them."""
+    natal_sun = next(b for b in birth_chart["bodies"] if b["key"] == "Su")
+    natal_sun_sid = natal_sun["sign"] * 30 + natal_sun["inSign"]
+    jd_return = find_solar_return_jd(natal_sun_sid, year, lat, lon, tz)
+
+    dt_utc = jd_to_utc_datetime(jd_return)
+    dt_local = dt_utc + timedelta(hours=tz)
+    annual_chart = compute_chart(dt_local.year, dt_local.month, dt_local.day,
+                                  dt_local.hour, dt_local.minute, lat, lon, tz, ss=dt_local.second)
+
+    natal_asc = next(b for b in birth_chart["bodies"] if b["key"] == "As")
+    annual_asc = next(b for b in annual_chart["bodies"] if b["key"] == "As")
+    annual_moon = next(b for b in annual_chart["bodies"] if b["key"] == "Mo")
+    annual_sun = next(b for b in annual_chart["bodies"] if b["key"] == "Su")
+
+    age_at_return = year - birth_dt.year
+    muntha_sign = (natal_asc["sign"] + age_at_return) % 12
+    muntha_house = ((muntha_sign - annual_asc["sign"]) % 12) + 1
+
+    is_day_birth = 6 <= dt_local.hour < 18
+    day_night_body = annual_sun if is_day_birth else annual_moon
+
+    offices = {
+        "Janma Lagna Pati": RASHI_LORD.get(natal_asc["sign"]),
+        "Var\u1e63a Lagna Pati": RASHI_LORD.get(annual_asc["sign"]),
+        "Munth\u0101 Pati": RASHI_LORD.get(muntha_sign),
+        "Dina-R\u0101tri Pati": RASHI_LORD.get(day_night_body["sign"]),
+    }
+    weekday_lord = DAY_LORD_BY_WEEKDAY[dt_local.weekday()]
+
+    return {
+        "jd_return": jd_return, "dt_local": dt_local, "annual_chart": annual_chart,
+        "muntha_sign": muntha_sign, "muntha_house": muntha_house,
+        "muntha_lord": offices["Munth\u0101 Pati"], "offices": offices,
+        "is_day_birth": is_day_birth, "weekday_lord": weekday_lord,
+        "age_at_return": age_at_return,
+    }
+
+
 def compute_bcp_favorability(birth_bodies: list, asc_sign: int, activated_house: int, mks_houses: dict) -> dict:
     """A simplified, clearly-labelled heuristic for whether the activated
     house looks broadly favourable or one to be careful with: caution if
@@ -2016,6 +2097,78 @@ def build_bcp_activated_svg(birth_bodies, transit_bodies, asc_sign, bcp, argala,
 
     parts.append("</svg>")
     return "".join(parts)
+
+
+def render_varsha_pravesha_mandala(birth_chart: dict, birth_dt: datetime, default_city: tuple):
+    """Varṣa Praveśa Mandala — the Tājika solar-return annual chart.
+    Computes the exact return instant, casts the annual chart, and shows
+    Munthā and 4 of the 5 classical Pañcādhikārī office-bearers (see
+    compute_varsha_pravesha's docstring for why the 5th, Tri-Rāśi Pati, and
+    the Varṣeśvara selection itself, are deliberately left out rather than
+    approximated)."""
+    st.markdown(f'<p style="color:{C["gold"]};font-weight:700;font-size:20px;margin:4px 0 2px;">'
+                f'\U0001f300 Var\u1e63a Prave\u015ba Mandala</p>', unsafe_allow_html=True)
+    st.caption("\u0935\u0930\u094d\u0937 \u092a\u094d\u0930\u0935\u0947\u0936 \u092e\u0923\u094d\u0921\u0932 \u00b7 exact solar return, T\u0101jika offices, and Munth\u0101 in one place.")
+
+    ycol, lcol = st.columns(2)
+    with ycol:
+        vp_year = st.number_input("Annual year", min_value=1900, max_value=2100,
+                                   value=date.today().year, step=1, key="vp_year")
+    with lcol:
+        vp_query = st.text_input("Annual location", value=default_city[0], key="vp_location_query")
+        vp_matches = [c for c in CITIES if vp_query.lower() in (c[0] + " " + c[1]).lower()] or CITIES[:8]
+        vp_labels = [f"{c[0]} \u00b7 {c[1]}" for c in vp_matches[:8]]
+        vp_chosen = st.selectbox("Match", vp_labels, key="vp_location_sel", label_visibility="collapsed")
+        vp_city = vp_matches[vp_labels.index(vp_chosen)]
+
+    if not st.button("Calculate annual mandala", key="vp_calculate"):
+        st.caption("Pick a year and location, then calculate to see this year's solar return.")
+        return
+
+    with st.spinner("Finding the exact solar return moment..."):
+        vp = compute_varsha_pravesha(birth_chart, birth_dt, int(vp_year), vp_city[2], vp_city[3], vp_city[4])
+
+    annual_bodies = [b for b in vp["annual_chart"]["bodies"] if b["key"] in CORE_KEYS]
+    annual_asc = next(b for b in annual_bodies if b["key"] == "As")
+
+    rcol1, rcol2 = st.columns([1.3, 1])
+    with rcol1:
+        st.markdown(f'<p class="kmuted" style="font-size:12px;font-weight:700;">ANNUAL D1 \u00b7 {vp_year} SOLAR RETURN</p>', unsafe_allow_html=True)
+        annual_svg = build_svg_chart(annual_bodies, [], annual_asc["sign"], show_nakshatra=False, show_transits=False)
+        st.markdown(f'<div style="display:flex;justify-content:center;">{annual_svg}</div>', unsafe_allow_html=True)
+    with rcol2:
+        st.markdown(
+            f'<div class="kcard"><p class="kmuted" style="font-size:11px;letter-spacing:0.05em;margin:0;">EXACT VAR\u1e62A PRAVE\u015aA</p>'
+            f'<p style="font-size:20px;font-weight:700;margin:6px 0;">{vp["dt_local"].strftime("%d %b %Y, %I:%M:%S %p")}</p>'
+            f'<p class="kmuted" style="font-size:12px;">{vp_city[0]}, {vp_city[1]} \u00b7 age {vp["age_at_return"]}</p></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="kcard" style="margin-top:10px;background:{C["panelSoft"]};">'
+            f'<p class="kmuted" style="font-size:11px;letter-spacing:0.05em;margin:0;">MUNTH\u0100 \u00b7 PROGRESSED LAGNA</p>'
+            f'<p style="font-size:20px;font-weight:700;margin:6px 0;">{SIGNS_ASCII[vp["muntha_sign"]]} \u00b7 H{vp["muntha_house"]}</p>'
+            f'<p class="kmuted" style="font-size:12px;">Lord {BODY_FULLNAME_ASCII.get(vp["muntha_lord"], vp["muntha_lord"])}</p></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(f'<p style="color:{C["gold"]};font-weight:700;margin-top:16px;">Pa\u00f1c\u0101dhik\u0101r\u012b \u2014 annual offices</p>', unsafe_allow_html=True)
+    ocols = st.columns(4)
+    office_items = list(vp["offices"].items()) + [("Dina Lord (weekday)", vp["weekday_lord"])]
+    for i, (label, lord_key) in enumerate(office_items):
+        with ocols[i % 4]:
+            st.markdown(
+                f'<div class="kcard" style="min-height:90px;margin-bottom:10px;">'
+                f'<p class="kmuted" style="font-size:10.5px;letter-spacing:0.05em;margin:0;">{label.upper()}</p>'
+                f'<p style="font-size:19px;font-weight:700;margin:6px 0;">{BODY_FULLNAME_ASCII.get(lord_key, lord_key)}</p></div>',
+                unsafe_allow_html=True,
+            )
+    st.caption(
+        "\u26a0\ufe0f These are 4 of the 5 classical Pa\u00f1c\u0101dhik\u0101r\u012b candidates for Var\u015be\u015bvara "
+        "(Lord of the Year). The 5th office, Tri-R\u0101\u015bi Pati, is omitted \u2014 its classical table has "
+        "documented scholarly disagreement across source texts. Actually selecting the Var\u015be\u015bvara among "
+        "qualifying candidates needs a Pa\u00f1cavarg\u012bya Bala strength score, which this app doesn't compute, "
+        "so no single 'winner' is picked here."
+    )
 
 
 def render_bcp_research_chakra(birth_chart: dict, birth_bodies: list, transit_bodies: list, asc_sign: int, birth_dt: datetime):
@@ -6604,6 +6757,12 @@ if _premium_for_limit:
     st.markdown('<div class="kcard">', unsafe_allow_html=True)
     _bcp_birth_dt = datetime.combine(form["dob"], form["tob"])
     render_bcp_research_chakra(birth_chart, core_birth_bodies, core_transit_bodies, _d1_asc["sign"], _bcp_birth_dt)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+if _premium_for_limit:
+    st.markdown('<div id="section-varsha"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="kcard">', unsafe_allow_html=True)
+    render_varsha_pravesha_mandala(birth_chart, _bcp_birth_dt, form["city"])
     st.markdown("</div>", unsafe_allow_html=True)
 
 if _premium_for_limit:
